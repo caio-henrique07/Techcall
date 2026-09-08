@@ -11,8 +11,11 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
+import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { db, ALUNO_ID } from '../firebase/config';
 
-export default function NewCallScreen() {
+
+export default function NewCallScreen({ navigation }: any) {
   // Estados: "caixinhas" que guardam o que o usuário digita ou a foto que escolhe
   const [description, setDescription] = useState('');
   const [photoUri, setPhotoUri] = useState<string | null>(null);
@@ -22,6 +25,8 @@ export default function NewCallScreen() {
 
   // Controla o texto "Buscando localização..." enquanto aguardamos o GPS
   const [loadingLocation, setLoadingLocation] = useState(false);
+
+  const [saving, setSaving] = useState(false);
 
   // Função para tirar foto com a câmera
   async function handleTakePhoto() {
@@ -39,59 +44,60 @@ export default function NewCallScreen() {
     }
   }
 
+  // Faz o check-in de localização: pega as coordenadas e converte em endereço.
+  async function handleGetLocation() {
+    // 1. Pede permissão de localização em primeiro plano
+    const permission = await Location.requestForegroundPermissionsAsync();
+
+    if (!permission.granted) {
+      Alert.alert('Permissão negada', 'Precisamos da localização para o check-in.');
+      return;
+    }
+
+    setLoadingLocation(true);
+
+    try {
+      // 2. Verifica se o GPS do aparelho está ligado
+      const gpsAtivo = await Location.hasServicesEnabledAsync();
+      if (!gpsAtivo) {
+        Alert.alert('GPS desligado', 'Ative a localização do aparelho e tente novamente.');
+        return;
+      }
+
+      // 3. Captura latitude e longitude atuais
+      const position = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      // 4. Reverse Geocoding: transforma coordenadas em endereço legível
+      const [local] = await Location.reverseGeocodeAsync({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+      });
+
+      if (local) {
+        const enderecoFormatado = `${local.street ?? 'Endereço não identificado'}, ${local.city ?? ''} - ${local.region ?? ''}`;
+        setAddress(enderecoFormatado);
+      } else {
+        setAddress('Endereço não encontrado para esta coordenada.');
+      }
+    } catch (error) {
+      Alert.alert('Erro', 'Não foi possível obter a localização. Tente novamente.');
+    } finally {
+      setLoadingLocation(false);
+    }
+  }
+
   // Função para escolher da galeria
   async function handlePickFromGallery() {
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
 
     if (!permission.granted) {
-      Alert.alert('Permissão negada', 'Precisamos acessar suas fotos.');      
+      Alert.alert('Permissão negada', 'Precisamos acessar suas fotos.');
       return;
     }
 
-        async function handleGetLocation() {
-      // 1. Pede permissão de localização em primeiro plano
-      const permission = await Location.requestForegroundPermissionsAsync();
-    
-      if (!permission.granted) {
-        Alert.alert('Permissão negada', 'Precisamos da localização para o check-in.');
-        return;
-      }
-    
-      setLoadingLocation(true);
-    
-      try {
-        // 2. Verifica se o GPS do aparelho está ligado
-        const gpsAtivo = await Location.hasServicesEnabledAsync();
-        if (!gpsAtivo) {
-          Alert.alert('GPS desligado', 'Ative a localização do aparelho e tente novamente.');
-          return;
-        }
-    
-        // 3. Captura latitude e longitude atuais
-        const position = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.Balanced,
-        });
-    
-        // 4. Reverse Geocoding: transforma coordenadas em endereço legível
-        const [local] = await Location.reverseGeocodeAsync({
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-        });
-    
-        if (local) {
-          const enderecoFormatado = `${local.street ?? 'Endereço não identificado'}, ${local.city ?? ''} - ${local.region ?? ''}`;
-          setAddress(enderecoFormatado);
-        } else {
-          setAddress('Endereço não encontrado para esta coordenada.');
-        }
-      } catch (error) {
-        Alert.alert('Erro', 'Não foi possível obter a localização. Tente novamente.');
-      } finally {
-        setLoadingLocation(false);
-      }
-    }
-
-    // Abre a câmera para escolher uma foto da galeria
+    // Abre a galeria para escolher uma foto
     const result = await ImagePicker.launchImageLibraryAsync({
       allowsEditing: true, // Permite cortar a foto
       aspect: [4, 3], // Proporção da imagem
@@ -102,6 +108,31 @@ export default function NewCallScreen() {
       setPhotoUri(result.assets[0].uri);
     }
   }
+
+    async function handleCreateCall() {
+    setSaving(true);
+  
+    try {
+      await addDoc(collection(db, 'alunos', ALUNO_ID, 'chamados'), {
+        description,
+        photoUri,
+        address,
+        status: 'aberto',
+        criadoEm: serverTimestamp(),
+      });
+  
+      Alert.alert('Sucesso', 'Chamado registrado!');
+      setDescription('');
+      setPhotoUri(null);
+      setAddress(null);
+      navigation.navigate('CallList');
+    } catch (error) {
+      Alert.alert('Erro', 'Não foi possível salvar o chamado. Tente novamente.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -139,13 +170,30 @@ export default function NewCallScreen() {
           <Text style={styles.buttonText}>Galeria</Text>
         </TouchableOpacity>
       </View>
+      <Text style={styles.label}>Localização (check-in)</Text>
+      {address ? (
+        <Text style={styles.address}>{address}</Text>
+      ) : (
+        <Text style={styles.placeholderText}>Nenhuma localização registrada</Text>
+      )}
       <TouchableOpacity
-        style={[styles.button, styles.confirmButton, !description && styles.disabledButton]}
-        disabled={!description}
-        onPress={() => Alert.alert('Sucesso', 'Chamado registrado localmente!')}
+        style={[styles.button, styles.locationButton, loadingLocation && styles.disabledButton]}
+        disabled={loadingLocation}
+        onPress={handleGetLocation}
       >
-        <Text style={styles.buttonText}>Criar Chamado</Text>
+        <Text style={styles.buttonText}>
+          {loadingLocation ? 'Buscando localização...' : 'Fazer check-in'}
+        </Text>
       </TouchableOpacity>
+
+      <TouchableOpacity
+        style={[styles.button, styles.confirmButton, (!description || saving) && styles.disabledButton]}
+        disabled={!description || saving}
+        onPress={handleCreateCall}
+      >
+        <Text style={styles.buttonText}>{saving ? 'Salvando...' : 'Criar Chamado'}</Text>
+      </TouchableOpacity>
+
     </ScrollView>
   );
 }
@@ -165,6 +213,8 @@ const styles = StyleSheet.create({
   button: { flex: 1, borderRadius: 8, padding: 14, alignItems: 'center' },
   cameraButton: { backgroundColor: '#1565c0' },
   galleryButton: { backgroundColor: '#6a1b9a' },
+  address: { fontSize: 15, color: '#222' },
+  locationButton: { backgroundColor: '#00796b', marginTop: 12 },
   confirmButton: { backgroundColor: '#2e7d32', marginTop: 20 },
   disabledButton: { backgroundColor: '#a5d6a7' },
   buttonText: { color: '#fff', fontWeight: 'bold' },
